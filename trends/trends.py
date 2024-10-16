@@ -41,7 +41,7 @@ def timeit(func):
 
 
 @st.cache_data
-def fetch_tweets_cached(search_query, start_date, end_date, limit=500):
+def fetch_tweets_cached(search_query, start_date, end_date, limit=100):
     logging.info(f"Executing fetch_tweets_cached for query: {search_query}")
     supabase = create_client(url, key)
     result = supabase.rpc(
@@ -54,11 +54,11 @@ def fetch_tweets_cached(search_query, start_date, end_date, limit=500):
         },
     ).execute()
     df = pd.DataFrame(result.data)
-    df['search_word'] = search_query
+    df['search_word'] = search_query  # Add this line
     return df
 
 @timeit
-async def fetch_tweets(search_words, start_date, end_date, limit=500):
+async def fetch_tweets(search_words, start_date, end_date, limit=100):
     logging.info(f"Executing fetch_tweets for words: {search_words}")
     results = []
     for word in search_words:
@@ -137,7 +137,7 @@ def plot_word_occurrences(word_occurrences_dict, monthly_tweet_counts, normalize
         y_col = 'word_count'
         y_title = 'Word Count'
 
-    fig = px.line(df, x='month', y=y_col, color='word', title='Word Occurrences Over Time')
+    fig = px.line(df, x='month', y=y_col, color='word', title=f'Word Occurrences Over Time {"(normalized by monthly tweet count)" if normalize else ""}')
     fig.update_layout(xaxis_title='Month', yaxis_title=y_title)
     fig.update_traces(mode='lines+markers')  # Add markers for selection
     return fig
@@ -165,10 +165,10 @@ async def main():
     
     _streamlit_thread_context.set(get_script_run_ctx())
     
+    selection = None
     col1, col2 = st.columns(2)
     
     with col1:
-        form = st.form("search_form")
         search_words = st_tags(
             label="",
             text="Enter search words",
@@ -178,23 +178,24 @@ async def main():
             key="1",
         )
 
-        date_col1, date_col2 = form.columns(2)
-        with date_col1:
-            start_date = st.date_input("Start Date", value=date(2020, 1, 1))
-        with date_col2:
-            end_date = st.date_input("End Date", value=date.today())
+        advanced_options = st.expander("Advanced options")
+        
+        with advanced_options:
+            date_col1, date_col2 = st.columns(2)
+            with date_col1:
+                start_date = st.date_input("Start Date", value=date(2020, 1, 1))
+            with date_col2:
+                end_date = st.date_input("End Date", value=date.today())
 
-        users = fetch_users()
-        user_options = {user["username"]: user["account_id"] for user in users}
-        selected_users = form.multiselect("Select Users", options=list(user_options.keys()))
-        user_ids = [user_options[user] for user in selected_users]
-        normalize = form.checkbox('Normalize by monthly tweet count')
-        submit_button = form.form_submit_button(label='Search')
+            users = fetch_users()
+            user_options = {user["username"]: user["account_id"] for user in users}
+            selected_users = st.multiselect("Select Users", options=list(user_options.keys()))
+            user_ids = [user_options[user] for user in selected_users]
+            normalize = st.checkbox('Normalize by monthly tweet count', value=True)
 
     # Check if query parameters have changed
     query_changed = (
-        submit_button
-        or "prev_search_words" not in st.session_state
+        "prev_search_words" not in st.session_state
         or "prev_start_date" not in st.session_state
         or "prev_end_date" not in st.session_state
         or "prev_user_ids" not in st.session_state
@@ -230,11 +231,12 @@ async def main():
         monthly_tweet_counts = st.session_state.monthly_tweet_counts
 
         with col1:
-            st.subheader("Word Occurrences Over Time")
+            st.subheader("Keyword Trends")
             if word_occurrences_dict:
                 fig = plot_word_occurrences(
                     word_occurrences_dict, monthly_tweet_counts, normalize
                 )
+                st.info("Drag horizontally on the graph to filter tweets in the right column.")
                 selection = st.plotly_chart(fig, use_container_width=True, key="word_occurrences", selection_mode='box', on_select="rerun")
                 logging.info(f"Selected points: {selection}")
             else:
@@ -279,7 +281,11 @@ async def main():
                                 end_date = max(selected_dates).date()
                                 word_tweets = fetch_tweets_cached(word, start_date, end_date)
                             else:
-                                word_tweets = tweets_df[tweets_df['search_word'] == word]
+                                if 'search_word' in tweets_df.columns:
+                                    word_tweets = tweets_df[tweets_df['search_word'] == word]
+                                else:
+                                    st.error("'search_word' column not found in tweets DataFrame. Please check the data fetching process.")
+                                    word_tweets = pd.DataFrame()  # Empty DataFrame as fallback
 
                             st.write(f"Showing tweets for '{word}'")
                             if word_tweets.empty:
