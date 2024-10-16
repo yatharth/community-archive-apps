@@ -43,10 +43,6 @@ def timeit(func):
 @st.cache_data
 def fetch_tweets_cached(search_query, start_date, end_date, limit=500):
     logging.info(f"Executing fetch_tweets_cached for query: {search_query}")
-    ctx = _streamlit_thread_context.get(None)
-    if ctx:
-        add_script_run_ctx(ctx)
-    
     supabase = create_client(url, key)
     result = supabase.rpc(
         "search_tweets",
@@ -58,17 +54,16 @@ def fetch_tweets_cached(search_query, start_date, end_date, limit=500):
         },
     ).execute()
     df = pd.DataFrame(result.data)
-    df['search_word'] = search_query  # Add this line to track which word matched
+    df['search_word'] = search_query
     return df
 
 @timeit
 async def fetch_tweets(search_words, start_date, end_date, limit=500):
     logging.info(f"Executing fetch_tweets for words: {search_words}")
-    tasks = [
-        asyncio.to_thread(fetch_tweets_cached, word, start_date, end_date, limit)
-        for word in search_words
-    ]
-    results = await asyncio.gather(*tasks)
+    results = []
+    for word in search_words:
+        result = await asyncio.to_thread(fetch_tweets_cached, word, start_date, end_date, limit)
+        results.append(result)
     return pd.concat(results, ignore_index=True)
 
 
@@ -86,6 +81,7 @@ def fetch_word_occurrences_cached(word, start_date, end_date, user_ids):
         "word_occurrences",
         {
             "search_word": word,
+            "user_ids": user_ids if len(user_ids) > 0 else None,
         },
     ).execute()
     
@@ -182,8 +178,11 @@ async def main():
             key="1",
         )
 
-        start_date = form.date_input("Start Date", value=date(2020, 1, 1))
-        end_date = form.date_input("End Date", value=date.today())
+        date_col1, date_col2 = form.columns(2)
+        with date_col1:
+            start_date = st.date_input("Start Date", value=date(2020, 1, 1))
+        with date_col2:
+            end_date = st.date_input("End Date", value=date.today())
 
         users = fetch_users()
         user_options = {user["username"]: user["account_id"] for user in users}
@@ -220,6 +219,10 @@ async def main():
                 st.session_state.prev_start_date = start_date
                 st.session_state.prev_end_date = end_date
                 st.session_state.prev_user_ids = user_ids
+        else:
+            st.session_state.tweets_df = pd.DataFrame()
+            st.session_state.word_occurrences_dict = {}
+            st.session_state.monthly_tweet_counts = fetch_monthly_tweet_counts()
 
     if "tweets_df" in st.session_state:
         tweets_df = st.session_state.tweets_df
@@ -228,11 +231,14 @@ async def main():
 
         with col1:
             st.subheader("Word Occurrences Over Time")
-            fig = plot_word_occurrences(
-                word_occurrences_dict, monthly_tweet_counts, normalize
-            )
-            selection = st.plotly_chart(fig, use_container_width=True, key="word_occurrences", on_select="rerun")
-            logging.info(f"Selected points: {selection}")
+            if word_occurrences_dict:
+                fig = plot_word_occurrences(
+                    word_occurrences_dict, monthly_tweet_counts, normalize
+                )
+                selection = st.plotly_chart(fig, use_container_width=True, key="word_occurrences", selection_mode='box', on_select="rerun")
+                logging.info(f"Selected points: {selection}")
+            else:
+                st.write("No data to display. Please enter search words.")
 
         with col2:
             st.subheader("Related Tweets")
@@ -263,37 +269,40 @@ async def main():
                 unsafe_allow_html=True
             )
             with tweet_container:
-                tabs = st.tabs(search_words)
-                for word, tab in zip(search_words, tabs):
-                    with tab:
-                        word_tweets = tweets_df[tweets_df['search_word'] == word]
-                        
-                        # Filter tweets based on selection
-                        if selection and selection['selection']['points']:
-                            selected_dates = [pd.to_datetime(point['x']) for point in selection['selection']['points']]
-                            word_tweets.loc[:, 'created_at'] = pd.to_datetime(word_tweets['created_at'])
-                            word_tweets = word_tweets[pd.to_datetime(word_tweets['created_at']).dt.to_period('M').isin([date.to_period('M') for date in selected_dates])]
-                        
-                        if word_tweets.empty:
-                            st.write(f"No tweets found for '{word}'")
-                        else:
-                            for _, tweet in word_tweets.iterrows():
-                                tweet_url = f"https://twitter.com/i/web/status/{tweet['tweet_id']}"
-                                highlighted_text = tweet['full_text'].replace(word, f"<b>{word}</b>")
-                                st.markdown(
-                                    f"""
-                                    <div class="tweet-container">
-                                        <img src="{tweet['avatar_media_url']}" class="tweet-avatar" alt="Avatar">
-                                        <div class="tweet-content">
-                                            <b>@{tweet['username']}</b> - <a href="{tweet_url}" target="_blank" style="color: inherit; text-decoration: none;">{tweet['created_at']}</a>
-                                            <br>
-                                            {highlighted_text}
-                                    </div>
-                                    """,
-                                    unsafe_allow_html=True
-                                )
-                                st.markdown("---")
-                
+                if search_words:
+                    tabs = st.tabs(search_words)
+                    for word, tab in zip(search_words, tabs):
+                        with tab:
+                            if selection and selection['selection']['points']:
+                                selected_dates = [pd.to_datetime(point['x']) for point in selection['selection']['points']]
+                                start_date = min(selected_dates).date()
+                                end_date = max(selected_dates).date()
+                                word_tweets = fetch_tweets_cached(word, start_date, end_date)
+                            else:
+                                word_tweets = tweets_df[tweets_df['search_word'] == word]
+
+                            st.write(f"Showing tweets for '{word}'")
+                            if word_tweets.empty:
+                                st.write("No tweets found")
+                            else:
+                                for _, tweet in word_tweets.iterrows():
+                                    tweet_url = f"https://twitter.com/i/web/status/{tweet['tweet_id']}"
+                                    highlighted_text = tweet['full_text'].replace(word, f"<b>{word}</b>")
+                                    st.markdown(
+                                        f"""
+                                        <div class="tweet-container">
+                                            <img src="{tweet['avatar_media_url']}" class="tweet-avatar" alt="Avatar">
+                                            <div class="tweet-content">
+                                                <b>@{tweet['username']}</b> - <a href="{tweet_url}" target="_blank" style="color: inherit; text-decoration: none;">{tweet['created_at']}</a>
+                                                <br>
+                                                {highlighted_text}
+                                        </div>
+                                        """,
+                                        unsafe_allow_html=True
+                                    )
+                                    st.markdown("---")
+                else:
+                    st.write("No search words entered. Please enter words to see related tweets.")
 
 if __name__ == "__main__":
     asyncio.run(main())
