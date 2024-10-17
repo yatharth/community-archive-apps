@@ -15,6 +15,7 @@ import plotly.express as px
 import contextvars
 import logging
 import time
+import json
 
 load_dotenv(".env")
 st.set_page_config(layout="wide")
@@ -28,6 +29,18 @@ key: str = (
 )
 
 
+
+def format_tweet_count(count):
+    digits = len(str(int(count)))
+    if digits > 9:
+        return f"{count/10**9:.1f}B"
+    elif digits > 6:
+        return f"{count/10**6:.1f}M"
+    elif digits > 3:
+        return f"{count/10**3:.1f}K"
+    return str(count)
+
+
 # Add this function to measure execution time
 def timeit(func):
     async def wrapper(*args, **kwargs):
@@ -35,12 +48,12 @@ def timeit(func):
         result = await func(*args, **kwargs)
         end_time = time.time()
         duration = end_time - start_time
-        st.write(f"{func.__name__} took {duration:.2f} seconds")
+        logging.info(f"{func.__name__} took {duration:.2f} seconds")
         return result
     return wrapper
 
 
-@st.cache_data
+@st.cache_data(ttl=3600)
 def fetch_tweets_cached(search_query, start_date, end_date, limit=100):
     logging.info(f"Executing fetch_tweets_cached for query: {search_query}")
     supabase = create_client(url, key)
@@ -55,6 +68,7 @@ def fetch_tweets_cached(search_query, start_date, end_date, limit=100):
     ).execute()
     df = pd.DataFrame(result.data)
     df['search_word'] = search_query  # Add this line
+    df['created_at'] = pd.to_datetime(df['created_at'], utc=True)
     return df
 
 @timeit
@@ -69,12 +83,9 @@ async def fetch_tweets(search_words, start_date, end_date, limit=100):
 
 
 _streamlit_thread_context = contextvars.ContextVar("streamlit_thread_context")
-@st.cache_data
+@st.cache_data(ttl=3600)
 def fetch_word_occurrences_cached(word, start_date, end_date, user_ids):
     logging.info(f"Executing fetch_word_occurrences for word: {word}")
-    ctx = _streamlit_thread_context.get(None)
-    if ctx:
-        add_script_run_ctx(ctx)
     
     supabase = create_client(url, key)
     result = supabase.rpc(
@@ -103,7 +114,7 @@ async def fetch_word_occurrences(search_words, start_date, end_date, user_ids):
     return {k: v for d in results for k, v in d.items()}
 
 
-@st.cache_data
+@st.cache_data(ttl=3600)
 def fetch_monthly_tweet_counts():
     logging.info("Executing fetch_monthly_tweet_counts")
     supabase = create_client(url, key)
@@ -131,19 +142,18 @@ def plot_word_occurrences(word_occurrences_dict, monthly_tweet_counts, normalize
     
     if normalize:
         df['normalized_count'] = df['word_count'] / df['tweet_count'] * 1000
-        y_col = 'normalized_count'
-        y_title = 'Occurrences per 1000 tweets'
+        y_col, y_title = 'normalized_count', 'Occurrences per 1000 tweets'
     else:
-        y_col = 'word_count'
-        y_title = 'Word Count'
+        y_col, y_title = 'word_count', 'Word Count'
 
-    fig = px.line(df, x='month', y=y_col, color='word', title=f'Word Occurrences Over Time {"(normalized by monthly tweet count)" if normalize else ""}')
+    fig = px.line(df, x='month', y=y_col, color='word', 
+                  title=f'Word Occurrences Over Time {"(normalized)" if normalize else ""}')
     fig.update_layout(xaxis_title='Month', yaxis_title=y_title)
     fig.update_traces(mode='lines+markers')  # Add markers for selection
     return fig
 
 
-@st.cache_data
+@st.cache_data(ttl=3600)
 def fetch_users():
     logging.info("Executing fetch_users")
     supabase = create_client(url, key)
@@ -151,7 +161,35 @@ def fetch_users():
     return result.data
 
 
+@st.cache_data(ttl=3600)  # Cache for 1 hour
+def fetch_global_stats():
+    supabase = create_client(url, key)
+    result = supabase.table("global_activity_summary").select("*").order('last_updated', desc=True).limit(1).execute()
+    return result.data[0] if result.data else None
+
 st.title("Trends in the Community Archive")
+
+# Fetch global stats
+global_stats = fetch_global_stats()
+
+if global_stats:
+    total_tweets = format_tweet_count(global_stats['total_tweets'])
+    total_accounts = global_stats['total_accounts']
+
+    # Add explanation and link with dynamic stats
+    st.markdown(f"""
+        This app analyzes trends in the [Community Archive](https://www.community-archive.org/), an open database 
+        and API for tweet histories. With over {total_tweets} tweets from {total_accounts} accounts, it enables developers to build advanced search tools, AI-powered apps, and other innovative projects using social media data.
+    """)
+else:
+    st.markdown("""
+        This app analyzes trends in the [Community Archive](https://www.community-archive.org/), an open database 
+        and API for tweet histories. It enables developers to build advanced search tools, AI-powered apps, 
+        and other innovative projects using social media data.
+    """)
+
+# Add a divider for visual separation
+st.divider()
 
 # st.sidebar.header("Search Settings")
 default_words = ["ingroup", "postrat", "tpot"]
@@ -170,17 +208,16 @@ async def main():
     
     with col1:
         search_words = st_tags(
-            label="",
-            text="Enter search words",
+            label="Enter search words",
+            text="Press enter after each word",
             value=default_words,
             suggestions=["meditation", "mindfulness", "retreat"],
             maxtags=10,
-            key="1",
+            key="search_words",
         )
 
-        advanced_options = st.expander("Advanced options")
-        
-        with advanced_options:
+        # Move advanced options to an expander
+        with st.expander("Advanced options"):
             date_col1, date_col2 = st.columns(2)
             with date_col1:
                 start_date = st.date_input("Start Date", value=date(2020, 1, 1))
@@ -216,10 +253,12 @@ async def main():
                 st.session_state.monthly_tweet_counts = fetch_monthly_tweet_counts()
 
                 # Update previous query parameters
-                st.session_state.prev_search_words = search_words
-                st.session_state.prev_start_date = start_date
-                st.session_state.prev_end_date = end_date
-                st.session_state.prev_user_ids = user_ids
+                st.session_state.update({
+                    "prev_search_words": search_words,
+                    "prev_start_date": start_date,
+                    "prev_end_date": end_date,
+                    "prev_user_ids": user_ids
+                })
         else:
             st.session_state.tweets_df = pd.DataFrame()
             st.session_state.word_occurrences_dict = {}
@@ -238,7 +277,6 @@ async def main():
                 )
                 st.info("Drag horizontally on the graph to filter tweets in the right column.")
                 selection = st.plotly_chart(fig, use_container_width=True, key="word_occurrences", selection_mode='box', on_select="rerun")
-                logging.info(f"Selected points: {selection}")
             else:
                 st.write("No data to display. Please enter search words.")
 
@@ -266,6 +304,7 @@ async def main():
                 .tweet-content {
                     flex: 1;
                 }
+                .tweet-content a { color: inherit; text-decoration: none; }
                 </style>
                 """,
                 unsafe_allow_html=True
