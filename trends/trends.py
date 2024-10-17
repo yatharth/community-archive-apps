@@ -179,7 +179,7 @@ if global_stats:
     # Add explanation and link with dynamic stats
     st.markdown(f"""
         This app analyzes trends in the [Community Archive](https://www.community-archive.org/), an open database 
-        and API for tweet histories. With over {total_tweets} tweets from {total_accounts} accounts, it enables developers to build advanced search tools, AI-powered apps, and other innovative projects using social media data.
+        and API for tweet histories. With over {total_tweets} tweets from {total_accounts} accounts, it enables developers to build advanced search tools, AI-powered apps, and other sensemaking projects.
     """)
 else:
     st.markdown("""
